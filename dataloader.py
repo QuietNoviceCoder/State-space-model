@@ -14,6 +14,7 @@ target_length = 300
 train_dir = Path('data/train')
 testa_dir = Path('data/test_a')
 testb_dir = Path('data/test_b')
+
 with open('data/train_dataset.csv', 'w', newline='', encoding='utf-8') as f:
     writer = csv.writer(f)
     # 写入表头
@@ -26,7 +27,6 @@ with open('data/train_dataset.csv', 'w', newline='', encoding='utf-8') as f:
             for file in os.listdir(class_path):
                 full_path = os.path.join(class_path, file)
                 writer.writerow([full_path, label])
-df = pd.read_csv('data/train_dataset.csv')
 #统一输出帧的长度
 def pad_truncate(mfcc, target_length):
     # 1秒音频（16kHz）
@@ -70,4 +70,5 @@ features = (features - mean) / std
 np.save('data/train_features.npy', features)
 np.save('data/train_labels.npy', labels)
 print("over")
+
 

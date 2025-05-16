@@ -21,6 +21,8 @@ class featureDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.mfccs[idx], self.labels[idx]
+
+
 if __name__ == '__main__':
     # 加载数据
     train_features_path = 'data/train_features.npy'
@@ -35,11 +37,10 @@ if __name__ == '__main__':
     train_dataset = featureDataset(x_train_tensor, y_train_tensor)
     test_dataset = featureDataset(x_test_tensor, y_test_tensor)
     #定义网络
-    input_size = 20  # 输入特征维度
+    input_size = 13  # 输入特征维度
     hidden_size = 128  # 隐藏层大小
-    channels1 = 32  #第一次映射维度
-    channels2 = 16  #第二次映射维度
-    channels3 = 8   #第三次映射维度
+    channels1 = 16  #第一次映射维度
+    channels2 = 8   #第二次映射维度
     slide_window = 300
     t_len = 300
     step = 0.1/t_len
@@ -48,20 +49,16 @@ if __name__ == '__main__':
             super(SSMNet, self).__init__()
             self.SSM1 = sf.SSM_model(hidden_size,1/slide_window, "tanh",t_len,DPLR=True)
             self.SSM2 = sf.SSM_model(hidden_size,1/slide_window, "tanh",t_len,DPLR=True)
-            self.SSM3 = sf.SSM_model(hidden_size,1/slide_window, "tanh",t_len,DPLR=True)
-            self.fc1 = nn.Linear(input_size, channels1)
+            self.fc = nn.Linear(input_size, channels1)
             self.fc2 = nn.Linear(channels1, channels2)
-            self.fc3 = nn.Linear(channels2, channels3)
-            self.fc4 = nn.Linear(channels3 * t_len, out_features=20)
+            self.fc3 = nn.Linear(channels2 * t_len, out_features=20)
         def forward(self, input,fft=True):
-            x = self.fc1(input)
+            x = self.fc(input)
             h1 = self.SSM1(x, fft,DPLR=True)
             x1 = self.fc2(h1)
             h2 = self.SSM2(x1, fft,DPLR=True)
-            x2 = self.fc3(h2)
-            h3 = self.SSM3(x2, fft,DPLR=True)
-            x3 = h3.flatten(1)
-            y = self.fc4(x3)
+            x3 = h2.flatten(1)
+            y = self.fc3(x3)
             return y
 
     model = SSMNet()
@@ -69,20 +66,22 @@ if __name__ == '__main__':
 
     #设置训练参数
     epochs = 100
-    batch_size = 32
+    batch_size = 16
     lossF = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(params=model.parameters(),lr=0.001,weight_decay=1e-3)
+    optimizer = torch.optim.Adam(params=model.parameters(),lr=0.001,weight_decay=1e-2)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=30)
     train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size, shuffle=False)
     history = {'Test Loss': [], 'Test Accuracy': []}
-
+    # model = torch.load('SSM_model_16_8.pth',weights_only=False)
     #开始训练
     model.to(device)
     for epoch in range(1,epochs+1):
         processBar = tqdm(train_loader,unit = 'step')
         model.train()
         for step,(train_mfccs,train_labels) in enumerate(processBar):
+            train_mfccs = train_mfccs
+            train_labels = train_labels
             model.zero_grad()
             outputs = model(train_mfccs)
             loss = lossF(outputs, train_labels)
@@ -92,7 +91,6 @@ if __name__ == '__main__':
             #反向传播
             loss.backward()
             optimizer.step()
-            # scheduler.step()
             processBar.set_description("[%d/%d] Loss: %.4f, Acc: %.4f" %
                                        (epoch, epochs, loss.item(), accuracy.item()))
 
@@ -134,5 +132,5 @@ if __name__ == '__main__':
     matplotlib.pyplot.ylabel('Accuracy')
     matplotlib.pyplot.show()
 
-    torch.save(model, 'SSM_model_8_4.pth')
+    torch.save(model, 'SSM_model.pth')
     print("nice")
