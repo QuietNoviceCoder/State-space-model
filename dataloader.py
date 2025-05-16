@@ -51,7 +51,7 @@ class AudioDataset(Dataset):
         audio, sr = librosa.load(audio_path,sr=None)
         # 处理标签（假设是字符串标签）
         label = self.labels[idx]
-        mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=20)
+        mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
         mfcc = pad_truncate(mfcc, target_length)
         return mfcc, label
 
@@ -64,8 +64,8 @@ for mfcc, label in dataset:
 features = np.array(features).swapaxes(1,2)
 labels = np.array(labels)
 #归一化
-mean = features.mean(axis=(0, 1)).reshape(1,1,20)
-std = features.std(axis=(0, 1)).reshape(1,1,20)+1e-8
+mean = features.mean(axis=(0, 1)).reshape(1,1,13)
+std = features.std(axis=(0, 1)).reshape(1,1,13)+1e-8
 features = (features - mean) / std
 np.save('data/train_features.npy', features)
 np.save('data/train_labels.npy', labels)
