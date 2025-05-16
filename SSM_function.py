@@ -140,7 +140,6 @@ def torch_get_K(*args,DPLR=False):
         I = torch.eye(A_L.shape[0]).to(A_L.device)
         z = torch.exp((torch.pi * -2j) * torch.arange(n_times) / n_times).to(A_L.device)
         w = 2 / derta * (1-z)/(1+z)
-        G = torch.zeros([1, n_times], dtype=torch.complex64).to(A_L.device)
         #C波浪
         C_ = C @ (I - A_L)
         k00 = cauchy(C_ * B.T,w,eig_value)
