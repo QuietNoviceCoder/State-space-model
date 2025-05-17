@@ -37,15 +37,12 @@ def pad_truncate(mfcc, target_length):
     else:
         return np.pad(mfcc,((0,0), (0,target_length - len)))
 
-
 class AudioDataset(Dataset):
     def __init__(self, dataframe):
         self.file_paths = dataframe['file_path'].values
         self.labels = dataframe['label'].values
-
     def __len__(self):
         return len(self.file_paths)
-
     def __getitem__(self, idx):
         # 加载音频
         audio_path = self.file_paths[idx]
@@ -56,20 +53,33 @@ class AudioDataset(Dataset):
         mfcc = pad_truncate(mfcc, target_length)
         return mfcc, label
 
-dataset = AudioDataset(df)
-features = []
-labels = []
-for mfcc, label in dataset:
-    features.append(mfcc)
-    labels.append(label)
-features = np.array(features).swapaxes(1,2)
-labels = np.array(labels)
+df1 = pd.read_csv('data/testa_dataset.csv')
+df2 = pd.read_csv('data/testb_dataset.csv')
+
+dataset_a = AudioDataset(df1)
+dataset_b = AudioDataset(df2)
+features_a = []
+features_b = []
+labels_a = []
+labels_b = []
+for mfcc, label in dataset_a:
+    features_a.append(mfcc)
+    labels_a.append(label)
+for mfcc, label in dataset_a:
+    features_b.append(mfcc)
+    labels_b.append(label)
+features_a = np.array(features_a).swapaxes(1,2)
+features_b = np.array(features_b).swapaxes(1,2)
 #归一化
-mean = features.mean(axis=(0, 1)).reshape(1,1,13)
-std = features.std(axis=(0, 1)).reshape(1,1,13)+1e-8
-features = (features - mean) / std
-np.save('data/train_features.npy', features)
-np.save('data/train_labels.npy', labels)
+mean_a = features_a.mean(axis=(0, 1)).reshape(1,1,13)
+std_a = features_a.std(axis=(0, 1)).reshape(1,1,13)+1e-8
+mean_b = features_b.mean(axis=(0, 1)).reshape(1,1,13)
+std_b = features_b.std(axis=(0, 1)).reshape(1,1,13)+1e-8
+
+features_a = (features_a - mean_a) / std_a
+features_b = (features_b - mean_b) / std_b
+np.save('data/testa_features.npy', features_a)
+np.save('data/testb_features.npy', features_b)
 print("over")
 
 

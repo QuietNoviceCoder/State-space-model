@@ -12,8 +12,6 @@ os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 label = []
 target_length = 300
 train_dir = Path('data/train')
-testa_dir = Path('data/test_a')
-testb_dir = Path('data/test_b')
 
 with open('data/train_dataset.csv', 'w', newline='', encoding='utf-8') as f:
     writer = csv.writer(f)
@@ -54,7 +52,7 @@ class AudioDataset(Dataset):
         mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=13)
         mfcc = pad_truncate(mfcc, target_length)
         return mfcc, label
-
+df = pd.read_csv('data/train_dataset.csv')
 dataset = AudioDataset(df)
 features = []
 labels = []
