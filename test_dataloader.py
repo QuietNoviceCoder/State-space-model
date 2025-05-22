@@ -6,6 +6,9 @@ import pandas as pd
 from torch.utils.data import Dataset
 import librosa
 import torch
+
+from dataloader import n_mfcc
+
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
 
@@ -13,7 +16,6 @@ label = []
 target_length = 1000
 testa_dir = Path('data/test_a')
 testb_dir = Path('data/test_b')
-
 with open('data/testa_dataset.csv', 'w', newline='', encoding='utf-8') as f:
     writer = csv.writer(f)
     # 写入表头
@@ -71,13 +73,14 @@ for mfcc, label in dataset_a:
 features_a = np.array(features_a).swapaxes(1,2)
 features_b = np.array(features_b).swapaxes(1,2)
 #归一化
-mean_a = features_a.mean(axis=(0, 1)).reshape(1,1,128)
-std_a = features_a.std(axis=(0, 1)).reshape(1,1,128)+1e-8
-mean_b = features_b.mean(axis=(0, 1)).reshape(1,1,128)
-std_b = features_b.std(axis=(0, 1)).reshape(1,1,128)+1e-8
+def guiyi(features):
+    mean = features.mean(axis=(0, 1)).reshape(1,1,n_mfcc)
+    std = features.std(axis=(0, 1)).reshape(1,1,n_mfcc)+1e-8
+    features = (features - mean) / std
+    return features
 
-features_a = (features_a - mean_a) / std_a
-features_b = (features_b - mean_b) / std_b
+features_a = guiyi(features_a)
+features_b = guiyi(features_b)
 a_test = torch.from_numpy(features_a)
 b_test = torch.from_numpy(features_b)
 torch.save({

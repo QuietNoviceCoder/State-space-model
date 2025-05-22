@@ -63,10 +63,14 @@ for mfcc, label in dataset:
 features = np.array(features).swapaxes(1,2)
 labels = np.array(labels)
 #归一化
-mean = features.mean(axis=(0, 1)).reshape(1,1,n_mfcc)
-std = features.std(axis=(0, 1)).reshape(1,1,n_mfcc)+1e-8
-features = (features - mean) / std
+def guiyi(features):
+    mean = features.mean(axis=(0, 1)).reshape(1,1,n_mfcc)
+    std = features.std(axis=(0, 1)).reshape(1,1,n_mfcc)+1e-8
+    features = (features - mean) / std
+    return features
 x_train, x_test, y_train, y_test = train_test_split(features, labels, test_size=0.1)
+x_train = guiyi(x_train)
+x_test = guiyi(x_test)
 x_train = torch.from_numpy(x_train)
 x_test = torch.from_numpy(x_test)
 y_train = torch.from_numpy(y_train)

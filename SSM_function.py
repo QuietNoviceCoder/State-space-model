@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 import numpy as np
-
+from flashfft.flashfftconv import FlashFFTConv
+import warnings
+warnings.filterwarnings("ignore",category=  UserWarning,message="ComplexHalf support is experimental.*")
 #定义hippo矩阵和离散方法
 def get_LegT(N,slide_window):
     A = np.zeros((N, N), dtype=float)
@@ -203,8 +205,13 @@ def torch_convolution(u,K,fft):
                 out_fft = K_fft * u_fft
                 out[:,:,i] = torch.fft.irfft(out_fft,u.shape[1])
         return out
-
-
+def torch_flashfftconv(u,K,L):
+    #输入u的形状是（B，H,L）,K的形状是（H,L）
+    #L必须是256-4,194,304之间的2的幂，若大于32768，必须是16的倍数
+    #u的长度可以小于L，但是必须是2的倍数，L的大小必须是4的倍数
+    flash_conv = FlashFFTConv(L).to(u.device)
+    output = flash_conv(u, K)
+    return output
 #定义SSM线性层
 class SSM_model(nn.Module):
     def __init__(self,*args,DPLR=False):

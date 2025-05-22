@@ -5,82 +5,84 @@ from torch.utils.data.distributed import DistributedSampler
 import SSM_function as sf
 import matplotlib
 import matplotlib.pyplot as plt
-if __name__ == '__main__':
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 加载数据
-    data = torch.load('data/featurs_128.pt')
-    x_train_tensor = data['x_train'].to(device)
-    y_train_tensor = data['y_train'].to(device)
-    x_test_tensor = data['x_test'].to(device)
-    y_test_tensor = data['y_test'].to(device)
-    train_dataset = TensorDataset(x_train_tensor, y_train_tensor)
-    test_dataset = TensorDataset(x_test_tensor, y_test_tensor)
+# 加载数据
+data = torch.load('data/featurs_128.pt')
+x_train_tensor = data['x_train'].to(device)
+y_train_tensor = data['y_train'].to(device)
+x_test_tensor = data['x_test'].to(device)
+y_test_tensor = data['y_test'].to(device)
+train_dataset = TensorDataset(x_train_tensor, y_train_tensor)
+test_dataset = TensorDataset(x_test_tensor, y_test_tensor)
 
 
-    #定义网络
-    hidden_size = 128  # 隐藏层大小
+#定义网络
+hidden_size = 128  # 隐藏层大小
 
-    input_size = 128  # 输入特征维度
-    channels1 = 64  #第一次映射维度
-    channels2 = 16   #第二次映射维度
-    channels3 = 16
-    t_len = 1000
-    len_1 = 500
-    len_2 = 125
-    len_3 = 125
-    step = 0.1/t_len
-    class SSMNet(nn.Module):
-        def __init__(self):
-            super(SSMNet, self).__init__()
-            self.SSM1 = sf.SSM_model(64, step, "tanh",t_len,DPLR=True)
-            self.SSM2 = sf.SSM_model(64, step, "tanh",len_1,DPLR=True)
-            # self.SSM3 = sf.SSM_model(64, step, "relu",len_2,DPLR=True)
+input_size = 128  # 输入特征维度
+channels1 = 64  #第一次映射维度
+channels2 = 16   #第二次映射维度
+channels3 = 16
+t_len = 1000
+len_1 = 500
+len_2 = 125
+len_3 = 125
+step = 0.1/t_len
+class SSMNet(nn.Module):
+    def __init__(self):
+        super(SSMNet, self).__init__()
+        self.SSM1 = sf.SSM_model(64, step, "tanh",t_len,DPLR=True)
+        self.SSM2 = sf.SSM_model(64, step, "tanh",len_1,DPLR=True)
+        # self.SSM3 = sf.SSM_model(64, step, "relu",len_2,DPLR=True)
 
-            self.fc= nn.Linear(input_size, channels1)
-            self.fc2 = nn.Linear(channels1, channels2)
-            self.fc3 = nn.Linear(channels2, channels3)
-            self.fc4 = nn.Linear(channels2 * len_2, out_features=20)
+        self.fc= nn.Linear(input_size, channels1)
+        self.fc2 = nn.Linear(channels1, channels2)
+        self.fc3 = nn.Linear(channels2, channels3)
+        self.fc4 = nn.Linear(channels2 * len_2, out_features=20)
 
-            self.dropout = nn.Dropout(0.4)
-            self.pool1 = nn.AdaptiveAvgPool1d(len_1)
-            self.pool2 = nn.AdaptiveAvgPool1d(len_2)
-            self.pool3 = nn.AdaptiveAvgPool1d(len_3)
-            self.ln1 = nn.LayerNorm(channels1)
-            self.ln2 = nn.LayerNorm(channels2)
-            self.ln3 = nn.LayerNorm(channels3)
-        def forward(self, input,fft=True):
+        self.dropout = nn.Dropout(0.4)
+        self.pool1 = nn.AdaptiveAvgPool1d(len_1)
+        self.pool2 = nn.AdaptiveAvgPool1d(len_2)
+        self.pool3 = nn.AdaptiveAvgPool1d(len_3)
+        self.ln1 = nn.LayerNorm(channels1)
+        self.ln2 = nn.LayerNorm(channels2)
+        self.ln3 = nn.LayerNorm(channels3)
+    def forward(self, input,fft=True):
 
-            u1 = self.fc(input)
-            u1 = self.dropout(u1)
-            h1 = self.SSM1(u1, fft,DPLR=True).permute(0, 2, 1)
-            h1 = self.pool1(h1).permute(0, 2, 1)
+        u1 = self.fc(input)
+        u1 = self.dropout(u1)
+        h1 = self.SSM1(u1, fft,DPLR=True).permute(0, 2, 1)
+        h1 = self.pool1(h1).permute(0, 2, 1)
 
-            u2 = self.fc2(h1)
-            u2 = self.dropout(u2)
-            h2 = self.SSM2(u2, fft,DPLR=True).permute(0, 2, 1)
-            h2 = self.pool2(h2).permute(0, 2, 1)
+        u2 = self.fc2(h1)
+        u2 = self.dropout(u2)
+        h2 = self.SSM2(u2, fft,DPLR=True).permute(0, 2, 1)
+        h2 = self.pool2(h2).permute(0, 2, 1)
 
-            u4 = h2.flatten(1)
-            y = self.fc4(u4)
-            return y
+        u4 = h2.flatten(1)
+        y = self.fc4(u4)
+        return y
 
-    model = SSMNet()
-    print(model)
-    model = torch.load('model/best_model.pth', weights_only=False)
-    model.dropout = nn.Dropout(0.7)
-    #设置训练参数
-    epochs = 300
-    batch_size = 32
-    lossF = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
-    #label_smoothing=0.1
-    optimizer = torch.optim.AdamW(model.parameters(),lr=1e-4,weight_decay=1e-2)
+model = SSMNet()
+print(model)
+model = torch.load('model/best_model.pth', weights_only=False)
+model.dropout = nn.Dropout(0.7)
+#设置训练参数
+epochs = 200
+batch_size = 32
+lossF = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
+#label_smoothing=0.1
+lr = 1e-4
+L2 = 1e-3
+best_acc = 0.992898
+for i in range(10):
+    optimizer = torch.optim.AdamW(model.parameters(),lr=lr,weight_decay=L2)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=100)
     # train_sampler = DistributedSampler(train_dataset)#报错
     train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size, shuffle=False)
     history = {'Test Loss': [], 'Test Accuracy': []}
-    best_acc = 0.99
     #开始训练
     model.to(device)
     # if torch.cuda.device_count() > 1:
@@ -92,9 +94,9 @@ if __name__ == '__main__':
         for train_mfccs,train_labels in train_loader:
             train_mfccs = train_mfccs
             train_labels = train_labels
-            # if epoch > 0:
-            #    noise = (2 * torch.randn_like(train_mfccs) - 1).to(device)
-            #    train_mfccs = train_mfccs + noise * 0.001
+            if epoch > 0:
+               noise = (2 * torch.randn_like(train_mfccs) - 1).to(device)
+               train_mfccs = train_mfccs + noise * 0.001
             model.zero_grad()
             outputs = model(train_mfccs)
             loss = lossF(outputs, train_labels)
@@ -105,7 +107,7 @@ if __name__ == '__main__':
             #反向传播
             loss.backward()
             optimizer.step()
-        # scheduler.step()
+        scheduler.step()
         if (epoch+1)%10 == 0:
             train_loss = train_loss / len(train_loader)
             train_acc = train_acc / len(train_loader)
@@ -125,7 +127,7 @@ if __name__ == '__main__':
             TestLoss = totalLoss / len(test_loader)
             history['Test Loss'].append(TestLoss.item())
             history['Test Accuracy'].append(testAccuracy.item())
-            print(f'Epoch [{epoch + 1}/{epochs}], Train_Loss: {train_loss:.6f} , Train_Accuracy: {train_acc:.6f},'
+            print(f'Epoch [{epoch + 1 + epochs*i}/{epochs*10}], Train_Loss: {train_loss:.6f} , Train_Accuracy: {train_acc:.6f},'
                   f'Test_Loss: {TestLoss.item():.6f} , Test_Accuracy: {testAccuracy.item():.6f},')
 
             if testAccuracy > best_acc:
