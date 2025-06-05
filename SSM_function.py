@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 from flashfft.flashfftconv import FlashFFTConv
-# import warnings
+import warnings
+#test
 warnings.filterwarnings("ignore",category=  UserWarning,message="ComplexHalf support is experimental.*")
 #定义hippo矩阵和离散方法
 def get_LegT(N,slide_window):
