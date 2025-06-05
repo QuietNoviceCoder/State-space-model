@@ -32,8 +32,8 @@ step = 0.1/t_len
 class SSMNet(nn.Module):
     def __init__(self):
         super(SSMNet, self).__init__()
-        self.SSM1 = sf.SSMRTF_model(64,"tanh")
-        self.SSM2 = sf.SSMRTF_model(64,"tanh")
+        self.SSM1 = sf.SSMRTF_model(64,"tanh",1024)
+        self.SSM2 = sf.SSMRTF_model(64,"tanh",512)
 
         self.fc= nn.Linear(input_size, channels1)
         self.fc2 = nn.Linear(channels1, channels2)
@@ -65,14 +65,15 @@ class SSMNet(nn.Module):
 
 model = SSMNet()
 print(model)
-model = torch.load('model/best_model_rtf.pth', weights_only=False)
+# model = torch.load('model/best_model_rtf.pth', weights_only=False)
+model = torch.load("model/SSM_model_rtf.pth",weights_only=False)
 #设置训练参数
-epochs = 300
+epochs = 500
 batch_size = 64
-lossF = torch.nn.CrossEntropyLoss(label_smoothing=0)
+lossF = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
 #label_smoothing=0.1
 optimizer = torch.optim.AdamW(model.parameters(),lr=1e-4,weight_decay=1e-3)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=100)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=200)
 # train_sampler = DistributedSampler(train_dataset)#报错
 train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size, shuffle=False)
