@@ -209,13 +209,17 @@ def torch_flashfftconv(u,K,L):
     #输入u的形状是（B，H,L）,K的形状是（H,L）
     #L必须是256-4,194,304之间的2的幂，若大于32768，必须是16的倍数
     #u的长度可以小于L，但是必须是2的倍数，L的大小必须是4的倍数
+    u = u.permute(0, 2, 1).half().contiguous()
+    K = K.half().contiguous()
     flash_conv = FlashFFTConv(L).to(u.device)
     output = flash_conv(u, K)
-    return output
+    return output.permute(0, 2, 1).float()
 #定义SSM线性层
 class SSM_model(nn.Module):
     def __init__(self,*args,DPLR=False):
         super().__init__()
+        D_tensor = torch.tensor([0]).float()
+        self.D = nn.Parameter(D_tensor, requires_grad=True)
         if DPLR == False:
             hidden_size, step, activation = args
             A, B, C = get_LegS(hidden_size)
@@ -255,16 +259,17 @@ class SSM_model(nn.Module):
         if DPLR == False:
             K_c = torch_get_K(self.A, self.B, self.C, x.shape[1])
             h1 = torch_convolution(x,K_c,fft)
-            h2 = self.activation(h1)
+            y1 = h1 + self.D * x
         if DPLR == True:
             K_c = torch_get_K(self.A_L, self.B, self.C, self.P, self.Q, self.diag,self.step, x.shape[1], DPLR=True)
             h1 = torch_convolution(x, K_c, fft)
-            h2 = self.activation(h1)
-        return h2
+            y1 = h1 + self.D * x
+        return self.activation(y1)
 
 class SSMRTF_model(nn.Module):
-    def __init__(self,hidden_size,activation):
+    def __init__(self,hidden_size,activation,L):
         super().__init__()
+        self.L = L
         A, C = get_RTF(hidden_size,ini="zeros")
         A_tensor = torch.from_numpy(A).float()
         C_tensor = torch.from_numpy(C).float()
@@ -276,8 +281,9 @@ class SSMRTF_model(nn.Module):
             self.activation = nn.Sigmoid()
         if activation == "tanh":
             self.activation = nn.Tanh()
-    def forward(self,x,fft=True):
+    def forward(self,x):
         K_c = torch_get_RTF(self.A, self.C,x.shape[1])
-        h1 = torch_convolution(x,K_c,fft)
+        K = K_c.repeat(x.shape[2], 1)
+        h1 = torch_flashfftconv(x,K,self.L)
         h2 = self.activation(h1)
         return h2

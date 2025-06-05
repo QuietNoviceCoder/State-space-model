@@ -67,7 +67,7 @@ if __name__ == '__main__':
 
     model = SSMNet()
     print(model)
-    model = torch.load('model/best_model.pth', weights_only=False)
+    # model = torch.load('model/best_model.pth', weights_only=False)
     model.dropout = nn.Dropout(0.7)
     #设置训练参数
     epochs = 300
