@@ -35,7 +35,7 @@ def conj_round(input):
     real_part[torch.abs(real_part) < threshold] = 0
     imag_part[torch.abs(imag_part) < threshold] = 0
     return real_part+imag_part*1j
-def get_LegS(N,DPLR = False):
+def get_LegS(N,channels,DPLR = False):
     if DPLR==False:
         A = np.zeros((N, N), dtype=float)
         B = np.zeros((N, 1))
@@ -44,7 +44,8 @@ def get_LegS(N,DPLR = False):
                 if i > j : A[i,j] = -(np.sqrt((2*i+1)*(2*j+1)))
                 elif i == j: A[i,j] = -(i+1)
             B[i,0] = np.sqrt(2*i+1)
-        C = np.ones((1, N))
+        C = np.ones((channels, N))
+        B = np.tile(B, (1, channels))
         return A,B,C
     if DPLR==True:
         S = np.zeros((N, N), dtype=float)
@@ -69,6 +70,12 @@ def get_LegS(N,DPLR = False):
         B = U.conj().T @ B
         C = C @ U
         A = diag -  P @ Q.conj().T
+
+        B = np.tile(B, (1, channels))
+        C = np.tile(C, (channels, 1))
+        P = np.tile(P, (1, channels))
+        Q = np.tile(Q, (1, channels))
+
         return A,B,C,P,Q,eig_value
 def get_RTF(N,ini="zeros"):
     C = np.ones((1, N))
@@ -132,22 +139,25 @@ def get_K(A,B,C,n_times):
             K = B
     return C @ K
 def cauchy(QP,w,lamda):
-    QP = QP.flatten()
-    w = w.reshape(len(w),1)
-    out = (QP/(w - lamda)).sum(dim = 1)
-    return out.reshape(1,len(w))
+    den = w.unsqueeze(1) - lamda.unsqueeze(0)
+    division = QP.unsqueeze(0)/den.unsqueeze(1)
+    out = division.sum(dim = 2).T
+    return out
 
 def torch_get_K(*args,DPLR=False):
     if DPLR == False :
         A,B,C,n_times = args
-        for i in range(n_times):
-            if i > 0 :
-                raw_date = torch.mm(A,raw_date)
-                K = torch.cat((K,raw_date),dim=1)
-            elif i == 0:
-                raw_date = B
-                K = B
-        return torch.mm(C,K)
+        k_ = torch.zeros(C.shape[0],n_times)
+        for c in range(C.shape[0]):
+            for i in range(n_times):
+                if i > 0 :
+                    raw_date = torch.mm(A,raw_date)
+                    K = torch.cat((K,raw_date),dim=1)
+                elif i == 0:
+                    raw_date = B[:,c:c+1]
+                    K = B[:,c:c+1]
+            k_[c,:] = torch.mm(C[c:c+1,:], K)
+        return k_
     if DPLR == True:
         A_L,B,C,P,Q,eig_value,derta,n_times = args
         if A_L.dtype != torch.complex128:
@@ -263,19 +273,18 @@ def torch_convolution(u,K,fft):
             out = torch.fft.irfft(out_fft,u.shape[1]).float()
         return out
     if len(u.shape)==3:
-        out = torch.zeros([u.shape[0],u.shape[1],u.shape[2]],device=u.device)
+        out = torch.zeros_like(u,device=u.device)
         if fft == False:
             out = torch.nn.functional.conv1d(u, K)[:u.shape[0]]
             return out
         if fft == True:
             u_pad = torch.nn.functional.pad(u,(0,0,0,K.shape[1],0,0))
             k_pad = torch.nn.functional.pad(K,(0,u.shape[1]))
-            for i in range(u.shape[2]):
-                K_fft = torch.fft.rfft(k_pad)
-                u_fft = torch.fft.rfft(u_pad[:,:,i])
-                out_fft = K_fft * u_fft
-                out[:,:,i] = torch.fft.irfft(out_fft,u.shape[1])
-        return out
+            K_fft = torch.fft.rfft(k_pad)
+            u_fft = torch.fft.rfft(u_pad.permute(0,2,1))
+            out_fft = K_fft * u_fft
+            out = torch.fft.irfft(out_fft,u.shape[1]).float()
+        return out.permute(0,2,1)
 def torch_flashfftconv(u,K,L):
     #输入u的形状是（B，H,L）,K的形状是（H,L）
     #L必须是256-4,194,304之间的2的幂，若大于32768，必须是16的倍数
@@ -292,8 +301,8 @@ class SSM_model(nn.Module):
         D_tensor = torch.tensor([0]).float()
         self.D = nn.Parameter(D_tensor, requires_grad=True)
         if DPLR == False:
-            hidden_size, step, activation = args
-            A, B, C = get_LegS(hidden_size)
+            hidden_size, step, activation, channels = args
+            A, B, C = get_LegS(hidden_size,channels)
             A, B, C = discreatize(A, B, C, step, Discrete_method="B_trans")
             A_tensor = torch.from_numpy(A).float()
             B_tensor = torch.from_numpy(B).float()
@@ -302,9 +311,9 @@ class SSM_model(nn.Module):
             self.B = nn.Parameter(B_tensor, requires_grad=True)
             self.C = nn.Parameter(C_tensor, requires_grad=True)
         if DPLR == True:
-            hidden_size, step, activation,len = args
-            A,B,C,P,Q,diag =  get_LegS(hidden_size,DPLR=True)
-            Ab,_,Cb =discreatize(A, B, C, step, Discrete_method="B_trans")
+            hidden_size, step, activation,len, channels = args
+            A,B,C,P,Q,diag = get_LegS(hidden_size,channels,DPLR=True)
+            Ab,_,Cb = discreatize(A, B, C, step, Discrete_method="B_trans")
             A_L = np.linalg.matrix_power(Ab,len)
             A_L = torch.from_numpy(A_L)
             B = torch.from_numpy(B)
