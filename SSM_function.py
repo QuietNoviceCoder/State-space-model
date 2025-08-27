@@ -1,8 +1,11 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from flashfft.flashfftconv import FlashFFTConv
+from numpy import dtype
+# date  2025.8.6
+# from flashfft.flashfftconv import FlashFFTConv
 import warnings
+#2025.8.27
 #test
 warnings.filterwarnings("ignore",category=  UserWarning,message="ComplexHalf support is experimental.*")
 #定义hippo矩阵和离散方法
@@ -68,16 +71,24 @@ def get_LegS(N,DPLR = False):
         A = diag -  P @ Q.conj().T
         return A,B,C,P,Q,eig_value
 def get_RTF(N,ini="zeros"):
-    C = np.ones((1, N + 1))
+    C = np.ones((1, N))
     if ini == "zeros":
-        A = np.zeros((1, N+1))
-        A[0, 0] = 1
+        A = np.zeros((1, N))
     if ini == "roots":
-        sroots = -1 * np.arange(1, N + 1)
+        sroots = -1 * np.arange(1, N+1)
         zroots = np.exp(sroots)
         A = np.poly(zroots).reshape(1, N+1)
-    return A,C
-
+    return A[0,-N:].reshape(1,-1),C
+def get_S4D(N,init = "Inv"):
+    A = np.zeros((1, N), dtype=complex)
+    if init == "Inv":
+            A = -0.5 + 1j * N / np.pi * (N/(2 * np.arange(0,N) + 1)-1)
+    if init == "Lin":
+            A = -0.5 + 1j * np.pi * np.arange(0,N)
+    if init == "real":
+        A = -np.arange(1, N)-1
+    B = np.sqrt(2*np.arange(0,N)+1)/2
+    return A,B.reshape(N,1)
 def discreatize(A,B,C,step,Discrete_method="B_trans"):
     I = np.eye(A.shape[0])
     if Discrete_method == "F_trans":
@@ -103,8 +114,8 @@ def scan_SSM(Ab,Bb,Cb,u,x0):
 def run_SSM(Ab,Bb,Cb,u):
     L = u.shape[0]
     N = Ab.shape[0]
-    x0 = np.zeros((N,1))
-    y = np.zeros((1,L))
+    x0 = torch.zeros((N,1))
+    y = torch.zeros((1,L))
     for i in range(L):
         x0,y[0,i] = scan_SSM(Ab,Bb,Cb,u[i],x0)
     return y
@@ -126,7 +137,6 @@ def cauchy(QP,w,lamda):
     out = (QP/(w - lamda)).sum(dim = 1)
     return out.reshape(1,len(w))
 
-
 def torch_get_K(*args,DPLR=False):
     if DPLR == False :
         A,B,C,n_times = args
@@ -140,6 +150,13 @@ def torch_get_K(*args,DPLR=False):
         return torch.mm(C,K)
     if DPLR == True:
         A_L,B,C,P,Q,eig_value,derta,n_times = args
+        if A_L.dtype != torch.complex128:
+            A_L = torch.view_as_complex(A_L)
+            B = torch.view_as_complex(B)
+            C = torch.view_as_complex(C)
+            P = torch.view_as_complex(P)
+            Q = torch.view_as_complex(Q)
+            eig_value = torch.view_as_complex(eig_value)
         I = torch.eye(A_L.shape[0]).to(A_L.device)
         z = torch.exp((torch.pi * -2j) * torch.arange(n_times) / n_times).to(A_L.device)
         w = 2 / derta * (1-z)/(1+z)
@@ -153,14 +170,67 @@ def torch_get_K(*args,DPLR=False):
         K = torch.fft.irfft(K_w,n_times)
         return K
 
-def torch_get_RTF(A,C,len):
-    out = torch.zeros(1,len).to(A.device)
-    num = C.clone()
-    for i in range(len):
-        k_ = num[0,0]
-        out[0,i] = k_
-        num_new = torch.sub(num,A*k_)
-        num = torch.roll(num_new,-1,1)
+#重新定义卷积核K的获取函数
+def get_K_H(*args,DPLR=False):
+    if DPLR == False :
+        A,B,C,n_times = args
+        for i in range(n_times):
+            if i > 0 :
+                raw_date = torch.mm(A,raw_date)
+                K = torch.cat((K,raw_date),dim=1)
+            elif i == 0:
+                raw_date = B
+                K = B
+        K = torch.mm(C,K)
+        K_w = torch.fft.rfft(K,n_times)
+        return K,torch.max(torch.abs(K_w))
+    if DPLR == True:
+        A_L,B,C,P,Q,eig_value,derta,n_times = args
+        if A_L.dtype != torch.complex128:
+            A_L = torch.view_as_complex(A_L)
+            B = torch.view_as_complex(B)
+            C = torch.view_as_complex(C)
+            P = torch.view_as_complex(P)
+            Q = torch.view_as_complex(Q)
+            eig_value = torch.view_as_complex(eig_value)
+        I = torch.eye(A_L.shape[0]).to(A_L.device)
+        z = torch.exp((torch.pi * -2j) * torch.arange(n_times) / n_times).to(A_L.device)
+        w = 2 / derta * (1-z)/(1+z)
+        #C波浪
+        C_ = C @ (I - A_L)
+        k00 = cauchy(C_ * B.T,w,eig_value)
+        k01 = cauchy(C_ * P.T,w,eig_value)
+        k10 = cauchy(Q.conj().T * B.T,w,eig_value)
+        k11 = cauchy(Q.conj().T * P.T,w,eig_value)
+        K_w = 2/(1+z)*(k00 - k01 / (1+k11) * k10)
+        K = torch.fft.irfft(K_w,n_times)
+        return K , torch.max(torch.abs(K_w))
+def torch_get_RTF(A,C,L):
+    N = A.shape[1]
+    num = torch.nn.functional.pad(C,(1,L-N-1))
+    den = torch.nn.functional.pad(A,(1,L-N-1))
+    den[0,0] = 1
+    num_fft = torch.fft.rfft(num)
+    den_fft = torch.fft.rfft(den)
+    den_fft[den_fft.abs() < 1e-8] = 1e-8
+    # num/den
+    out_fft = num_fft / den_fft
+    out = torch.fft.irfft(out_fft, n=L)
+    return out
+
+def torch_get_RTF_feedback(A,C,L):
+    N = A.shape[1]
+    #C是一个 B*C*N 的tensor
+    channels = C.shape[1]
+    num = torch.nn.functional.pad(C,(1,L-N-1))
+    den = torch.nn.functional.pad(A,(1,L-N-1))
+    den[0,0] = 1
+    num_fft = torch.fft.rfft(num,dim=2)
+    den_fft = torch.fft.rfft(den)
+    den_fft[den_fft.abs() < 1e-8] = 1e-8
+    # num/den
+    out_fft = num_fft / den_fft
+    out = torch.fft.irfft(out_fft, dim=2,n=L)
     return out
 
 #定义卷积函数
@@ -178,8 +248,8 @@ def convolution(u,K,fft):
 
 
 def torch_convolution(u,K,fft):
-    if len(u.shape)==2:
-        u = u.reshape(u.shape[0],-1)
+    if len(u.shape)<=2:
+        u = u.reshape(1,-1)
         K = K.flatten()
         if fft == False:
             out = torch.nn.functional.conv1d(u, K)[:u.shape[1]]
@@ -192,7 +262,7 @@ def torch_convolution(u,K,fft):
             out_fft = K_fft * u_fft
             out = torch.fft.irfft(out_fft,u.shape[1]).float()
         return out
-    elif len(u.shape)==3:
+    if len(u.shape)==3:
         out = torch.zeros([u.shape[0],u.shape[1],u.shape[2]],device=u.device)
         if fft == False:
             out = torch.nn.functional.conv1d(u, K)[:u.shape[0]]
@@ -246,25 +316,26 @@ class SSM_model(nn.Module):
             self.A_L = nn.Parameter(A_L, requires_grad=False)
             self.B = nn.Parameter(B, requires_grad=True)
             self.C = nn.Parameter(C, requires_grad=True)
-            self.P = nn.Parameter(P, requires_grad=False)
-            self.Q = nn.Parameter(Q, requires_grad=False)
+            self.P = nn.Parameter(P, requires_grad=True)
+            self.Q = nn.Parameter(Q, requires_grad=True)
             self.diag = nn.Parameter(diag, requires_grad=False)
-            self.step = nn.Parameter(step, requires_grad=False)
+            self.step = nn.Parameter(step, requires_grad=True)
         if activation == "relu":
             self.activation = nn.ReLU()
         if activation == "sigmoid":
             self.activation = nn.Sigmoid()
         if activation == "tanh":
             self.activation = nn.Tanh()
-    def forward(self,x,fft=True,DPLR=False):
+    def forward(self,x,fft=True,DPLR=True):
         if DPLR == False:
             K_c = torch_get_K(self.A, self.B, self.C, x.shape[1])
             h1 = torch_convolution(x,K_c,fft)
             y1 = h1 + self.D * x
         if DPLR == True:
-            K_c = torch_get_K(self.A_L, self.B, self.C, self.P, self.Q, self.diag,self.step, x.shape[1], DPLR=True)
+            K_c = torch_get_K(self.A_L, self.B, self.C, self.P, self.Q, self.diag,self.step, x.shape[1],
+                              DPLR=True)
             h1 = torch_convolution(x, K_c, fft)
-            y1 = h1 + self.D * x
+            y1 = (h1 + self.D * x)
         return self.activation(y1)
 
 class SSMRTF_model(nn.Module):
@@ -272,10 +343,12 @@ class SSMRTF_model(nn.Module):
         super().__init__()
         self.L = L
         A, C = get_RTF(hidden_size,ini="zeros")
-        A_tensor = torch.from_numpy(A).float()
-        C_tensor = torch.from_numpy(C).float()
+        A_tensor = torch.from_numpy(A).float().reshape(1,-1)
+        C_tensor = torch.from_numpy(C).float().reshape(1,-1)
+        h0 = torch.tensor([0]).float()
         self.A = nn.Parameter(A_tensor,requires_grad=True)
         self.C = nn.Parameter(C_tensor,requires_grad=True)
+        self.h0 = nn.Parameter(h0,requires_grad=True)
         if activation == "relu":
             self.activation = nn.ReLU()
         if activation == "sigmoid":
@@ -286,5 +359,99 @@ class SSMRTF_model(nn.Module):
         K_c = torch_get_RTF(self.A, self.C,x.shape[1])
         K = K_c.repeat(x.shape[2], 1)
         h1 = torch_flashfftconv(x,K,self.L)
-        h2 = self.activation(h1)
+        h2 = self.activation(h1 + self.h0 * x)
+        return h2
+
+class Mamba(nn.Module):
+    def __init__(self,hidden_size ,channels ,step ,activation='tanh'):
+        super().__init__()
+        A,_ = get_S4D(hidden_size)
+        A_tensor = torch.from_numpy(A)
+        step = torch.tensor(step).float()
+        self.A = nn.Parameter(A_tensor,requires_grad=False)
+        self.step = nn.Parameter(step,requires_grad=False)
+        self.Sb = nn.Linear(channels, hidden_size)
+        self.Sc = nn.Linear(channels, hidden_size)
+        self.Ss = nn.Linear(channels, channels)
+        self.Softplus = nn.Softplus()
+        if activation == "relu":
+            self.activation = nn.ReLU()
+        if activation == "sigmoid":
+            self.activation = nn.Sigmoid()
+        if activation == "tanh":
+            self.activation = nn.Tanh()
+    def forward(self,x):
+        B = self.Sb(x)
+        C = self.Sc(x)
+        step = self.Softplus(self.step + self.Ss(x))
+        y = torch.zeros_like(x)
+        for i in range(x.shape[0]):
+            for j in range(x.shape[2]):
+                h0 = torch.zeros_like(self.A)
+                for k in range(x.shape[1]):
+                    A_ = torch.exp(step[i,k,j] * self.A)
+                    B_ = 1 / (step[i,k,j] * self.A) * (A_ -1) * step[i,k,j]*B[i,k,:]
+                    h = A_ * h0 + B_ * x[i,k,j]
+                    #取共轭参数
+                    y[i,k,j] = 2 * torch.dot(C[i,k,:],h.real.float())
+                    h0 = h
+        out = self.activation(y)
+        return out
+
+class feedback_model(nn.Module):
+    def __init__(self,hidden_size, step, activation,len):
+        super().__init__()
+        D_tensor = torch.tensor([0]).float()
+        self.D = nn.Parameter(D_tensor, requires_grad=True)
+        A,B,C,_,_,diag =  get_LegS(hidden_size,DPLR=True)
+        Ab,_,Cb =discreatize(A, B, C, step, Discrete_method="B_trans")
+        A_L = np.linalg.matrix_power(Ab,len)
+        A_L = torch.from_numpy(A_L)
+        B = torch.from_numpy(B)
+        C = torch.from_numpy(Cb)
+        diag = torch.from_numpy(diag)
+        step = torch.tensor(step)
+        self.A_L = nn.Parameter(A_L, requires_grad=False)
+        self.B = nn.Parameter(B, requires_grad=True)
+        self.C = nn.Parameter(C, requires_grad=True)
+        self.diag = nn.Parameter(diag, requires_grad=False)
+        self.step = nn.Parameter(step, requires_grad=False)
+        self.fc = nn.Linear(len, hidden_size)
+        if activation == "relu":
+            self.activation = nn.ReLU()
+        if activation == "sigmoid":
+            self.activation = nn.Sigmoid()
+        if activation == "tanh":
+            self.activation = nn.Tanh()
+    def forward(self,x,fft=True):
+        Q = self.fc(x)
+        y = torch.zeros_like(x)
+        for i in range(x.shape[0]):
+            Q_ = Q[i,:].reshape(-1,1)
+            K_c = torch_get_K(self.A_L, self.B, self.C, self.B, Q_, self.diag,self.step, x.shape[1], DPLR=True)
+            h1 = torch_convolution(x[i,:], K_c, fft)
+            y1 = h1 + self.D * x[i,:]
+            y[i,:] = y1
+        return self.activation(y)
+class SSMRTF_feedback_model(nn.Module):
+    def __init__(self,hidden_size,activation,len,L):
+        super().__init__()
+        self.L = L
+        A, _ = get_RTF(hidden_size,ini="zeros")
+        A_tensor = torch.from_numpy(A).float().reshape(1,-1)
+        h0 = torch.tensor([0]).float()
+        self.A = nn.Parameter(A_tensor,requires_grad=True)
+        self.h0 = nn.Parameter(h0,requires_grad=True)
+        self.fc = nn.Linear(len,1)
+        if activation == "relu":
+            self.activation = nn.ReLU()
+        if activation == "sigmoid":
+            self.activation = nn.Sigmoid()
+        if activation == "tanh":
+            self.activation = nn.Tanh()
+    def forward(self,x):
+        C = self.fc(x.permute(0,2,1))
+        K_c = torch_get_RTF_feedback(self.A, C,x.shape[1])
+        h1 = torch_flashfftconv(x,K_c,self.L)
+        h2 = self.activation(h1 + self.h0 * x)
         return h2
