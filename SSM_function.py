@@ -5,7 +5,10 @@ from numpy import dtype
 # date  2025.8.6
 # from flashfft.flashfftconv import FlashFFTConv
 import warnings
+'''
 #2025.8.27
+修改了多通道SSM，不同通道使用独立的SSM，但是其他的没有改，只有SSM函数
+'''
 #test
 warnings.filterwarnings("ignore",category=  UserWarning,message="ComplexHalf support is experimental.*")
 #定义hippo矩阵和离散方法
@@ -294,6 +297,26 @@ def torch_flashfftconv(u,K,L):
     flash_conv = FlashFFTConv(L).to(u.device)
     output = flash_conv(u, K)
     return output.permute(0, 2, 1).float()
+
+def Activation(activation=None, dim=-1):
+    if activation in [ None, 'id', 'identity', 'linear' ]:
+        return nn.Identity()
+    elif activation == 'tanh':
+        return nn.Tanh()
+    elif activation == 'relu':
+        return nn.ReLU()
+    elif activation == 'gelu':
+        return nn.GELU()
+    elif activation == 'elu':
+        return nn.ELU()
+    elif activation in ['swish', 'silu']:
+        return nn.SiLU()
+    elif activation == 'glu':
+        return nn.GLU(dim=dim)
+    elif activation == 'sigmoid':
+        return nn.Sigmoid()
+    elif activation == 'softplus':
+        return nn.Softplus()
 #定义SSM线性层
 class SSM_model(nn.Module):
     def __init__(self,*args,DPLR=False):
@@ -329,12 +352,7 @@ class SSM_model(nn.Module):
             self.Q = nn.Parameter(Q, requires_grad=True)
             self.diag = nn.Parameter(diag, requires_grad=False)
             self.step = nn.Parameter(step, requires_grad=True)
-        if activation == "relu":
-            self.activation = nn.ReLU()
-        if activation == "sigmoid":
-            self.activation = nn.Sigmoid()
-        if activation == "tanh":
-            self.activation = nn.Tanh()
+            self.activation = Activation(activation)
     def forward(self,x,fft=True,DPLR=True):
         if DPLR == False:
             K_c = torch_get_K(self.A, self.B, self.C, x.shape[1])
@@ -346,7 +364,37 @@ class SSM_model(nn.Module):
             h1 = torch_convolution(x, K_c, fft)
             y1 = (h1 + self.D * x)
         return self.activation(y1)
-
+class SSM_Block(nn.Module):
+    def __init__(
+            self,
+            hidden_size,
+            step,
+            mult_activation,
+            len,
+            channels,
+            final_act='gelu',
+            skip = False,
+            dropout=0.0,
+            norm = False,
+            DPLR=True):
+        super().__init__()
+        self.ssm = SSM_model(hidden_size,step,mult_activation,len,channels,DPLR=DPLR)
+        self.final_act = Activation(final_act)
+        self.fc = nn.Linear(channels,channels)
+        self.dropout = nn.Dropout(dropout)
+        self.skip = skip
+        self.normlization = norm
+        if norm == 'BN':self.norm = nn.BatchNorm1d(channels)
+        if norm == 'LN':self.norm = nn.LayerNorm(channels)
+    def forward(self,x):
+        y1 = self.ssm(x)
+        y2 = self.fc(y1)
+        y2 = self.final_act(y2)
+        if self.skip: y2 = y2 + x
+        if self.normlization == 'BN' :y2 = self.norm(y2.transpose(1, 2)).transpose(1, 2)
+        if self.normlization == 'LN' :y2 = self.norm(y2)
+        y2 = self.dropout(y2)
+        return y2
 class SSMRTF_model(nn.Module):
     def __init__(self,hidden_size,activation,L):
         super().__init__()
