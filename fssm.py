@@ -1,7 +1,7 @@
-import numpy as np
 import torch
 import torch.nn as nn
 import SSM_function as sf
+from flashfft.flashfftconv import FlashFFTConv
 
 
 def Activation(activation=None, dim=-1):
@@ -27,23 +27,24 @@ def Activation(activation=None, dim=-1):
 #结构为，反馈层，中间层，输出层
 #输出层的输出通过反馈进入反馈层，这样可以保证中间层可以任意调整
 
-#定义反馈层SSM
-class input_ssm(nn.Module):
+#定义输入层，中间层，反馈层
+
+class middle_fssm(nn.Module):
     def __init__(self,hidden_size, step, activation,len,channels):
         super().__init__()
         D_tensor = torch.tensor([0]).float()
         self.D = nn.Parameter(D_tensor, requires_grad=True)
         A,B,C,P,Q,diag =  sf.get_LegS(hidden_size,channels,DPLR=True)
         Ab,_,Cb = sf.discreatize(A, B, C, step, Discrete_method="B_trans")
-        A_L = np.linalg.matrix_power(Ab,len)
-        A_L = torch.from_numpy(A_L)
         B = torch.from_numpy(B)
         C = torch.from_numpy(Cb)
         P = torch.from_numpy(P)
         Q = torch.from_numpy(Q)
         diag = torch.from_numpy(diag)
         step = torch.tensor(step)
-        self.A_L = nn.Parameter(A_L, requires_grad=False)
+        len = sf.return_L(len)
+        len = torch.tensor(len)
+        self.flashfftconv = FlashFFTConv(2*len, dtype=torch.float16)
         self.B = nn.Parameter(B, requires_grad=True)
         self.C = nn.Parameter(C, requires_grad=True)
         self.P = nn.Parameter(P, requires_grad=True)
@@ -51,134 +52,17 @@ class input_ssm(nn.Module):
         self.diag = nn.Parameter(diag, requires_grad=False)
         self.step = nn.Parameter(step, requires_grad=True)
         self.activation = Activation(activation)
-
-    def forward(self,r,feedback,fft=True):
-        u = r - feedback
-        K_c = sf.torch_get_K(self.A_L, self.B, self.C, self.P, self.Q, self.diag, self.step, x.shape[1],
+    def forward(self,r):
+        u = r.permute(0, 2, 1).half().contiguous()
+        K_c = sf.torch_get_K_derta(self.B, self.C, self.P, self.Q, self.diag, self.step, u.shape[2],
                           DPLR=True)
-        h1 = sf.torch_convolution(u, K_c, fft)
+        K = K_c.contiguous()
+        h1 = self.flashfftconv(u, K).float()
         y1 = (h1 + self.D * u)
-        return self.activation(y1)
+        y = self.activation(y1)
+        return y.permute(0, 2, 1)
 
-#定义中间层SSM
-#就是普通的SSM，但是添加了传递函数的增益G、激活函数的增益H
-class middle_ssm_e(nn.Module):
-    def __init__(self,hidden_size, step, activation,len,channels):
-        super().__init__()
-        D_tensor = torch.tensor([0]).float()
-        self.D = nn.Parameter(D_tensor, requires_grad=True)
-        A,B,C,P,Q,diag =  sf.get_LegS(hidden_size,channels,DPLR=True)
-        Ab,_,Cb = sf.discreatize(A, B, C, step, Discrete_method="B_trans")
-        A_L = np.linalg.matrix_power(Ab,len)
-        A_L = torch.from_numpy(A_L)
-        B = torch.from_numpy(B)
-        C = torch.from_numpy(Cb)
-        P = torch.from_numpy(P)
-        Q = torch.from_numpy(Q)
-        diag = torch.from_numpy(diag)
-        step = torch.tensor(step)
-        self.A_L = nn.Parameter(A_L, requires_grad=False)
-        self.B = nn.Parameter(B, requires_grad=True)
-        self.C = nn.Parameter(C, requires_grad=True)
-        self.P = nn.Parameter(P, requires_grad=True)
-        self.Q = nn.Parameter(Q, requires_grad=True)
-        self.diag = nn.Parameter(diag, requires_grad=False)
-        self.step = nn.Parameter(step, requires_grad=True)
-        if activation == "relu":
-            self.activation = nn.ReLU()
-            self.H = nn.Parameter(torch.tensor(1), requires_grad=False)
-        if activation == "sigmoid":
-            self.activation = nn.Sigmoid()
-            self.H = nn.Parameter(torch.tensor(0.25), requires_grad=False)
-        if activation == "tanh":
-            self.activation = nn.Tanh()
-            self.H = nn.Parameter(torch.tensor(1), requires_grad=False)
-
-    def forward(self, r, fft=True):
-        u = r
-        K_c, K_h = sf.get_K_H(self.A_L, self.B, self.C, self.P, self.Q, self.diag, self.step, u.shape[1],
-                               DPLR=True)
-        h1 = sf.torch_convolution(u, K_c, fft)
-        y1 = (h1 + self.D * u)
-        return self.activation(y1), K_h * self.H
-
-class middle_ssm(nn.Module):
-    #参数设置
-    def __init__(self,hidden_size, step, activation,len,channels,n_layers=1,DPLR=False):
-        super().__init__()
-        #中间可以叠加若干个线性层
-        if n_layers>1:
-            self.n = n_layers
-            self.layers = nn.ModuleList()
-            if activation == "relu": self.activation = nn.ReLU()
-            if activation == "sigmoid":self.activation = nn.Sigmoid()
-            if activation == "tanh":self.activation = nn.Tanh()
-            for i in range(n_layers):
-                self.layers.append(middle_ssm_e(hidden_size[i], step[i], activation,len[i],channels))
-                self.layers.append(nn.Linear(channels,channels))
-                self.layers.append(self.activation)
-                self.layers.append(nn.LayerNorm(channels))
-
-        else:
-            self.n = 1
-            self.layer = middle_ssm_e(hidden_size, step, activation,len,channels)
-    def forward(self, r, fft=True):
-        if self.n>1:
-            for layer in self.layers:
-                H = 1
-                if isinstance(layer, middle_ssm_e):
-                    r,h = layer(r)
-                    H = H * h
-                else:r= layer(r)
-        else:r ,H= self.layer(r, fft)
-        return r,H
-
-#定义输出层SSM
-#需要通过输出y获得反馈信号，反馈信号feedback=Fy，通过F映射为和最初的输入一个维度
-class output_ssm(nn.Module):
-    #feed_size指反馈回去的信号大小:batch * len * channel
-    def __init__(self,hidden_size, step, activation,len,channels,input_size,feed_size):
-        super().__init__()
-        D_tensor = torch.tensor([0]).float()
-        self.D = nn.Parameter(D_tensor, requires_grad=True)
-        A,B,C,P,Q,diag =  sf.get_LegS(hidden_size,channels,DPLR=True)
-        Ab,_,Cb = sf.discreatize(A, B, C, step, Discrete_method="B_trans")
-        A_L = np.linalg.matrix_power(Ab,len)
-        A_L = torch.from_numpy(A_L)
-        B = torch.from_numpy(B)
-        C = torch.from_numpy(Cb)
-        P = torch.from_numpy(P)
-        Q = torch.from_numpy(Q)
-        diag = torch.from_numpy(diag)
-        step = torch.tensor(step)
-        self.A_L = nn.Parameter(A_L, requires_grad=False)
-        self.B = nn.Parameter(B, requires_grad=True)
-        self.C = nn.Parameter(C, requires_grad=True)
-        self.P = nn.Parameter(P, requires_grad=True)
-        self.Q = nn.Parameter(Q, requires_grad=True)
-        self.diag = nn.Parameter(diag, requires_grad=False)
-        self.step = nn.Parameter(step, requires_grad=True)
-        if activation == "relu":
-            self.activation = nn.ReLU()
-        if activation == "sigmoid":
-            self.activation = nn.Sigmoid()
-        if activation == "tanh":
-            self.activation = nn.Tanh()
-
-        self.H = nn.Parameter(torch.tensor(1,dtype=torch.float32), requires_grad=True)
-        self.F1 = nn.Linear(input_size[1], feed_size[1])
-        self.F2 = nn.Linear(input_size[2], feed_size[2])
-    def forward(self, r, fft=True):
-        u = r
-        K_c, K_h = sf.get_K_H(self.A_L, self.B, self.C, self.P, self.Q, self.diag, self.step, u.shape[1],
-                               DPLR=True)
-        h1 = sf.torch_convolution(u, K_c, fft)
-        #信号增益放在反馈之前,激活函数放在在反馈之后
-        y1 = (h1 + self.D * u) * self.H
-        feedback1 = self.F2(y1)
-        feedback2 = self.F1(feedback1.transpose(-2,-1))
-        return self.activation(y1), feedback2.transpose(-2,-1),K_h * self.H
-class Feed_Block(nn.Module):
+class FSSM_Block(nn.Module):
     def __init__(
             self,
             hidden_size,
@@ -186,89 +70,101 @@ class Feed_Block(nn.Module):
             mult_activation,
             len,
             channels,
-            mid_layers,
-            output_size=None,
-            feed_size=None,
+            model='input',
             final_act='gelu',
-            feed_act = None,
             skip = False,
-            dropout=0.1,
+            dropout=0.0,
             norm = False,
-            DPLR=True):
+            input_size=None,
+            feed_size=None,
+            feed_act=None,
+            ):
         super().__init__()
-        self.input_ssm = sf.SSM_Block(hidden_size, step, mult_activation, len, channels,final_act=final_act,skip=None,
-                            dropout=dropout,norm=norm,DPLR=DPLR)
-        self.output_ssm = sf.SSM_Block(hidden_size, step, mult_activation, len, channels,final_act=final_act,skip=skip,
-                            dropout=dropout,norm=norm,DPLR=DPLR)
-        self.mid_ssm = nn.ModuleList()
-        self.mid_layers = mid_layers
-        if mid_layers>1:
-            for i in range(mid_layers):
-                self.mid_ssm.append(sf.SSM_Block(hidden_size, step, mult_activation, len, channels,final_act=final_act,skip=skip,
-                            dropout=dropout,norm=norm,DPLR=DPLR))
-        else:self.mid_ssm.append(nn.Identity())
+        if model == 'input': self.fssm = middle_fssm(hidden_size, step, mult_activation,len,channels)
+        if model == 'middle':self.fssm = middle_fssm(hidden_size, step, mult_activation,len,channels)
+        if model == 'output':
+            self.fssm = middle_fssm(hidden_size, step, mult_activation,len,channels)
+            self.fc1 = nn.Linear(input_size[1], feed_size[1])
+            self.fc2 = nn.Linear(feed_size[2], feed_size[2])
+            self.feedact = Activation(feed_act)
+        self.model = model
+        self.final_act = Activation(final_act)
         self.fc = nn.Linear(channels,channels)
-        if feed_act is not None:
-            self.feed_act = Activation(feed_act)
-        else:self.feed_act = nn.Identity()
-    def forward(self,r):
-        f = torch.zeros_like(r).to(r.device)
-        for i in range(50):
-            y1 = self.input_ssm(r-f)
-            for layer in self.mid_ssm:
-                y1= layer(y1)
-            y2 = self.output_ssm(y1)
-            F = self.fc(y2)
-            e = torch.abs(F - f)
-            # print('max_e = ',torch.max(e))
-            # print('max_f = ',torch.max(torch.abs(F)))
-            if torch.max(e) < torch.max(torch.abs(F))*0.01:
-                # print('i=',i+1)
+        self.dropout = nn.Dropout(dropout)
+        self.skip = skip
+        self.normlization = norm
+        self.H = nn.Parameter(torch.tensor(1,dtype=torch.float32), requires_grad=True)
+        if norm == 'BN':self.norm = nn.BatchNorm1d(channels)
+        if norm == 'LN':self.norm = nn.LayerNorm(channels)
+    def forward(self,x,feedback=None):
+        if self.model == 'input':
+            y1 = self.fssm(x-feedback)
+        else:
+            y1 = self.fssm(x)
+        y2 = self.fc(y1)
+        y2 = self.final_act(y2)
+        if self.skip: y2 = y2 + x
+        if self.normlization == 'BN' :y2 = self.norm(y2.transpose(1, 2)).transpose(1, 2)
+        if self.normlization == 'LN' :y2 = self.norm(y2)
+        y = self.dropout(y2)*self.H
+        if self.model == 'output':
+            feedback = self.fc2(y)
+            feedback = self.fc1(feedback.permute(0,2,1)).permute(0,2,1)
+            feedback = self.feedact(feedback)
+            h = torch.norm(feedback, p=2, dim=1) / (torch.norm(x, p=2, dim=1) + 1e-6) * self.H
+            return y, feedback,h
+        else:
+            h = torch.norm(y, p=2, dim=1) / (torch.norm(x, p=2, dim=1) + 1e-6) * self.H
+            return y, h
+
+class FSSM_model(nn.Module):
+    def __init__(
+            self,
+            hidden_size,
+            step,
+            mult_activation,
+            len,
+            channels,
+            mid_layers=0,
+            final_act='gelu',
+            skip = False,
+            dropout=0.0,
+            norm = False,
+            input_size=None,
+            feed_size=None,
+            feed_act=None,
+            ):
+        super().__init__()
+        self.input = FSSM_Block(hidden_size,step,mult_activation,len,channels,'input',final_act,skip,dropout,norm,
+                                input_size=None)
+        self.mid = nn.ModuleList()
+        if mid_layers > 0:
+            for i in range(mid_layers):self.mid.append(
+                FSSM_Block(hidden_size, step, mult_activation, len, channels, 'middle', final_act, skip, dropout, norm)
+            )
+        else:self.mid.append(nn.Identity())
+        self.midlayers = mid_layers
+        self.output = FSSM_Block(hidden_size,step,mult_activation,len,channels,'output',final_act,skip,dropout,norm,
+                                input_size, feed_size, feed_act)
+    def forward(self,x):
+        feed = torch.zeros_like(x)
+        for i in range(30):
+            y1, h1 = self.input(x, feed)
+            h2 = torch.ones_like(h1)
+            y2 = y1
+            if self.midlayers > 0:
+                for layer in self.mid:
+                    y2,h2_ = layer(y2)
+                    h2 = h2 * h2_
+            y3,feedback,h3 = self.output(y2)
+            e = torch.abs((feedback - feed) / (torch.abs(feedback) + 1e-8) * 100)
+            if torch.mean(e) < 5:
+                # print('tiao_i=', i)
                 break
             else:
-                f = F.detach()
-                f= self.feed_act(f)
-        return y2
+                feed = (feed + 0.6 * (feedback - feed)).detach()
+        h = h1*h2*h3
+        return  y3,h
 
-class FSSMBlock(nn.Module):
-    def __init__(self, hidden_size, step, activation,len,input_size,channels,n_layers,feed_size):
-        super(FSSMBlock, self).__init__()
-        self.input_model = input_ssm(hidden_size, step, activation,len,channels)
-        mid_hidden = [hidden_size]*n_layers
-        mid_step = [step]*n_layers
-        mid_len = [len]*n_layers
-        self.hidden_model = middle_ssm(mid_hidden, mid_step,activation,mid_len,
-                                          channels,n_layers=4)
-        self.output_model = output_ssm(hidden_size, step, activation,len,channels,
-                                          input_size,feed_size)
-        self.bn1 = nn.BatchNorm1d(channels)
-        self.bn2 = nn.BatchNorm1d(channels)
-        self.bn3 = nn.BatchNorm1d(channels)
-
-        self.fc1 = nn.Linear(channels, channels)
-        self.fc2 = nn.Linear(channels, channels)
-        self.fc3 = nn.Linear(channels, channels)
-        self.activation = nn.Tanh()
-
-    def forward(self,x):
-        f = torch.zeros(x.shape[0],x.shape[1],x.shape[2]).to(x.device)
-        for i in range(10):
-            y1 ,H1= self.input_model(x,f)
-            y1 = self.fc1(y1)
-            y1 = self.activation(y1)
-            y1 = self.bn1(y1.transpose(1, 2)).transpose(1, 2)
-
-            y2 ,H2= self.hidden_model(y1)
-            y2 = self.bn2(y2.transpose(1, 2)).transpose(1, 2)
-
-            y3 ,F ,H3= self.output_model(y2)
-
-            e = torch.abs(F-f)
-            if torch.max(e) < 1e-5:break
-            else:f = F.detach()
-        y3 = self.fc3(f)
-        y3 = self.activation(y3)
-
-        y = self.bn3(y3.transpose(1, 2)).transpose(1, 2)
-        return y,H1*H2*H3
-
+def loss_h(h,Target):
+    return torch.relu(h - Target).mean()

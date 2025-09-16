@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 from numpy import dtype
-# date  2025.8.6
-# from flashfft.flashfftconv import FlashFFTConv
+# date  2025.9.12
+from flashfft.flashfftconv import FlashFFTConv
 import warnings
 '''
 #2025.8.27
@@ -182,6 +182,32 @@ def torch_get_K(*args,DPLR=False):
         K_w = 2/(1+z)*(k00 - k01 / (1+k11) * k10)
         K = torch.fft.irfft(K_w,n_times)
         return K
+def torch_get_K_derta(*args,DPLR=False):
+    if DPLR == False :
+        A,B,C,n_times = args
+        k_ = torch.zeros(C.shape[0],n_times)
+        for c in range(C.shape[0]):
+            for i in range(n_times):
+                if i > 0 :
+                    raw_date = torch.mm(A,raw_date)
+                    K = torch.cat((K,raw_date),dim=1)
+                elif i == 0:
+                    raw_date = B[:,c:c+1]
+                    K = B[:,c:c+1]
+            k_[c,:] = torch.mm(C[c:c+1,:], K)
+        return k_
+    if DPLR == True:
+        B,C_,P,Q,eig_value,derta,n_times = args
+        z = torch.exp((torch.pi * -2j) * torch.arange(n_times) / n_times).to(B.device)
+        w = 2 / derta * (1-z)/(1+z)
+        #C波浪
+        k00 = cauchy(C_ * B.T,w,eig_value)
+        k01 = cauchy(C_ * P.T,w,eig_value)
+        k10 = cauchy(Q.conj().T * B.T,w,eig_value)
+        k11 = cauchy(Q.conj().T * P.T,w,eig_value)
+        K_w = 2/(1+z)*(k00 - k01 / (1+k11) * k10)
+        K = torch.fft.irfft(K_w,n_times)
+        return K
 
 #重新定义卷积核K的获取函数
 def get_K_H(*args,DPLR=False):
@@ -286,17 +312,8 @@ def torch_convolution(u,K,fft):
             K_fft = torch.fft.rfft(k_pad)
             u_fft = torch.fft.rfft(u_pad.permute(0,2,1))
             out_fft = K_fft * u_fft
-            out = torch.fft.irfft(out_fft,u.shape[1]).float()
-        return out.permute(0,2,1)
-def torch_flashfftconv(u,K,L):
-    #输入u的形状是（B，H,L）,K的形状是（H,L）
-    #L必须是256-4,194,304之间的2的幂，若大于32768，必须是16的倍数
-    #u的长度可以小于L，但是必须是2的倍数，L的大小必须是4的倍数
-    u = u.permute(0, 2, 1).half().contiguous()
-    K = K.half().contiguous()
-    flash_conv = FlashFFTConv(L).to(u.device)
-    output = flash_conv(u, K)
-    return output.permute(0, 2, 1).float()
+            out = torch.fft.irfft(out_fft,u.shape[1]+K.shape[1]).float()
+        return out.permute(0,2,1)[:,:u.shape[1],:]
 
 def Activation(activation=None, dim=-1):
     if activation in [ None, 'id', 'identity', 'linear' ]:
@@ -317,12 +334,17 @@ def Activation(activation=None, dim=-1):
         return nn.Sigmoid()
     elif activation == 'softplus':
         return nn.Softplus()
+def return_L(len):
+    n = len.bit_length()
+    return 1<<n
 #定义SSM线性层
 class SSM_model(nn.Module):
-    def __init__(self,*args,DPLR=False):
+    def __init__(self,*args,usd_D=True,DPLR=False):
         super().__init__()
-        D_tensor = torch.tensor([0]).float()
-        self.D = nn.Parameter(D_tensor, requires_grad=True)
+        if usd_D == True:
+            D_tensor = torch.tensor([0]).float()
+            self.D = nn.Parameter(D_tensor, requires_grad=True)
+        else:self.D = nn.Parameter(torch.tensor([0]).float(), requires_grad=False)
         if DPLR == False:
             hidden_size, step, activation, channels = args
             A, B, C = get_LegS(hidden_size,channels)
@@ -364,6 +386,59 @@ class SSM_model(nn.Module):
             h1 = torch_convolution(x, K_c, fft)
             y1 = (h1 + self.D * x)
         return self.activation(y1)
+class SSM_model_derta(nn.Module):
+    def __init__(self,*args,usd_D=True,DPLR=False):
+        super().__init__()
+        if usd_D == True:
+            D_tensor = torch.tensor([0]).float()
+            self.D = nn.Parameter(D_tensor, requires_grad=True)
+        else:self.D = nn.Parameter(torch.tensor([0]).float(), requires_grad=False)
+        if DPLR == False:
+            hidden_size, step, activation, channels = args
+            A, B, C = get_LegS(hidden_size,channels)
+            A, B, C = discreatize(A, B, C, step, Discrete_method="B_trans")
+            A_tensor = torch.from_numpy(A).float()
+            B_tensor = torch.from_numpy(B).float()
+            C_tensor = torch.from_numpy(C).float()
+            self.A = nn.Parameter(A_tensor, requires_grad=False)
+            self.B = nn.Parameter(B_tensor, requires_grad=True)
+            self.C = nn.Parameter(C_tensor, requires_grad=True)
+        if DPLR == True:
+            hidden_size, step, activation,len, channels = args
+            _,B,C,P,Q,diag = get_LegS(hidden_size,channels,DPLR=True)
+            B = torch.from_numpy(B)
+            C = torch.from_numpy(C)
+            P = torch.from_numpy(P)
+            Q = torch.from_numpy(Q)
+            diag = torch.from_numpy(diag)
+            step = torch.tensor(step)
+            len = return_L(len)
+            len = torch.tensor(len)
+            self.B = nn.Parameter(B, requires_grad=True)
+            self.C_ = nn.Parameter(C, requires_grad=True)
+            self.P = nn.Parameter(P, requires_grad=True)
+            self.Q = nn.Parameter(Q, requires_grad=True)
+            self.diag = nn.Parameter(diag, requires_grad=True)
+            self.step = nn.Parameter(step, requires_grad=True)
+            self.activation = Activation(activation)
+            self.flashfftconv = FlashFFTConv(2*len,dtype=torch.float16)
+    def forward(self,x,fft=True,DPLR=True):
+        if DPLR == False:
+            K_c = torch_get_K(self.A, self.B, self.C, x.shape[1])
+            h1 = torch_convolution(x,K_c,fft)
+            y1 = h1 + self.D * x
+        if DPLR == True:
+            K_c = torch_get_K_derta(self.B, self.C_, self.P, self.Q, self.diag,self.step, x.shape[1],
+                              DPLR=True)
+            # h1 = torch_convolution(x, K_c, fft)
+            # 输入u的形状是（B，H,L）,K的形状是（H,L）
+            # L必须是256-4,194,304之间的2的幂，若大于32768，必须是16的倍数
+            # u的长度可以小于L，但是必须是2的倍数，L的大小必须是4的倍数
+            u = x.permute(0, 2, 1).half().contiguous()
+            K = K_c.contiguous()
+            h1 = self.flashfftconv(u, K).permute(0, 2, 1).float()
+            y1 = (h1 + self.D * x)
+        return self.activation(y1)
 class SSM_Block(nn.Module):
     def __init__(
             self,
@@ -378,7 +453,8 @@ class SSM_Block(nn.Module):
             norm = False,
             DPLR=True):
         super().__init__()
-        self.ssm = SSM_model(hidden_size,step,mult_activation,len,channels,DPLR=DPLR)
+        # self.ssm = SSM_model(hidden_size,step,mult_activation,len,channels,DPLR=DPLR)
+        self.ssm = SSM_model_derta(hidden_size, step, mult_activation, len, channels, DPLR=DPLR)
         self.final_act = Activation(final_act)
         self.fc = nn.Linear(channels,channels)
         self.dropout = nn.Dropout(dropout)
@@ -454,61 +530,3 @@ class Mamba(nn.Module):
                     h0 = h
         out = self.activation(y)
         return out
-
-class feedback_model(nn.Module):
-    def __init__(self,hidden_size, step, activation,len):
-        super().__init__()
-        D_tensor = torch.tensor([0]).float()
-        self.D = nn.Parameter(D_tensor, requires_grad=True)
-        A,B,C,_,_,diag =  get_LegS(hidden_size,DPLR=True)
-        Ab,_,Cb =discreatize(A, B, C, step, Discrete_method="B_trans")
-        A_L = np.linalg.matrix_power(Ab,len)
-        A_L = torch.from_numpy(A_L)
-        B = torch.from_numpy(B)
-        C = torch.from_numpy(Cb)
-        diag = torch.from_numpy(diag)
-        step = torch.tensor(step)
-        self.A_L = nn.Parameter(A_L, requires_grad=False)
-        self.B = nn.Parameter(B, requires_grad=True)
-        self.C = nn.Parameter(C, requires_grad=True)
-        self.diag = nn.Parameter(diag, requires_grad=False)
-        self.step = nn.Parameter(step, requires_grad=False)
-        self.fc = nn.Linear(len, hidden_size)
-        if activation == "relu":
-            self.activation = nn.ReLU()
-        if activation == "sigmoid":
-            self.activation = nn.Sigmoid()
-        if activation == "tanh":
-            self.activation = nn.Tanh()
-    def forward(self,x,fft=True):
-        Q = self.fc(x)
-        y = torch.zeros_like(x)
-        for i in range(x.shape[0]):
-            Q_ = Q[i,:].reshape(-1,1)
-            K_c = torch_get_K(self.A_L, self.B, self.C, self.B, Q_, self.diag,self.step, x.shape[1], DPLR=True)
-            h1 = torch_convolution(x[i,:], K_c, fft)
-            y1 = h1 + self.D * x[i,:]
-            y[i,:] = y1
-        return self.activation(y)
-class SSMRTF_feedback_model(nn.Module):
-    def __init__(self,hidden_size,activation,len,L):
-        super().__init__()
-        self.L = L
-        A, _ = get_RTF(hidden_size,ini="zeros")
-        A_tensor = torch.from_numpy(A).float().reshape(1,-1)
-        h0 = torch.tensor([0]).float()
-        self.A = nn.Parameter(A_tensor,requires_grad=True)
-        self.h0 = nn.Parameter(h0,requires_grad=True)
-        self.fc = nn.Linear(len,1)
-        if activation == "relu":
-            self.activation = nn.ReLU()
-        if activation == "sigmoid":
-            self.activation = nn.Sigmoid()
-        if activation == "tanh":
-            self.activation = nn.Tanh()
-    def forward(self,x):
-        C = self.fc(x.permute(0,2,1))
-        K_c = torch_get_RTF_feedback(self.A, C,x.shape[1])
-        h1 = torch_flashfftconv(x,K_c,self.L)
-        h2 = self.activation(h1 + self.h0 * x)
-        return h2
